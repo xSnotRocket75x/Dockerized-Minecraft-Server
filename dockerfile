@@ -3,7 +3,7 @@ FROM eclipse-temurin:21-jdk
 WORKDIR /app
 
 # Install curl
-RUN apt-get update && apt-get install -y curl unzip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y curl unzip jq && rm -rf /var/lib/apt/lists/*
 
 # Copy startup script
 COPY start.sh /usr/local/bin/start.sh
