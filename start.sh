@@ -1,132 +1,183 @@
 #!/bin/bash
 set -e
 
-echo "🧱 Starting container: ${CONTAINER_NAME:-undefined}"
+# ------------------------------
+# Environment Variables Required
+# ------------------------------
+: "${SERVER_TYPE:?Environment variable SERVER_TYPE is required (vanilla, fabric, forge, quilt)}"
+: "${MC_VERSION:?Environment variable MC_VERSION is required}"
+: "${MEMORY_MIN:?Environment variable MEMORY_MIN is required}"
+: "${MEMORY_MAX:?Environment variable MEMORY_MAX is required}"
 
-# --- Required environment variables ---
-required_vars=(
-  CONTAINER_NAME SERVER_TYPE MC_VERSION MEMORY_MAX MEMORY_MIN
-  EULA WORLD_NAME DIFFICULTY GAMEMODE MAX_PLAYERS VIEW_DISTANCE
-  ENABLE_COMMAND_BLOCKS ALLOW_FLIGHT MOTD ONLINE_MODE WHITE_LIST
-)
+# Optional environment variables with defaults
+WORLD_NAME="${WORLD_NAME:-world}"
+DIFFICULTY="${DIFFICULTY:-normal}"
+GAMEMODE="${GAMEMODE:-survival}"
+MAX_PLAYERS="${MAX_PLAYERS:-10}"
+VIEW_DISTANCE="${VIEW_DISTANCE:-10}"
+ENABLE_COMMAND_BLOCKS="${ENABLE_COMMAND_BLOCKS:-false}"
+ALLOW_FLIGHT="${ALLOW_FLIGHT:-false}"
+MOTD="${MOTD:-Docker Minecraft Server}"
+ONLINE_MODE="${ONLINE_MODE:-true}"
+WHITE_LIST="${WHITE_LIST:-false}"
 
-for var in "${required_vars[@]}"; do
-  if [ -z "${!var}" ]; then
-    echo "❌ ERROR: Environment variable '$var' is not set. Check your .env file."
-    exit 1
-  fi
-done
+# Optional installer versions for mod loaders
+FABRIC_INSTALLER_VERSION="${FABRIC_INSTALLER_VERSION:-1.1.0}"
+FORGE_INSTALLER_VERSION="${FORGE_INSTALLER_VERSION:-latest}"
+QUILT_INSTALLER_VERSION="${QUILT_INSTALLER_VERSION:-0.22.2}"
 
+# Paths
+WORKDIR="/app"
+MODS_DIR="$WORKDIR/mods"
+mkdir -p "$MODS_DIR"
+cd "$WORKDIR"
+
+echo "🧱 Starting container: ${CONTAINER_NAME:-Minecraft_Server}"
 echo "✅ Environment validated successfully."
 
-# --- Ensure mods folder exists ---
-mkdir -p mods
-
-# --- EULA agreement ---
-echo "eula=${EULA}" > eula.txt
-
-# --- Generate server.properties dynamically ---
-cat > server.properties <<EOF
-motd=${MOTD}
-level-name=${WORLD_NAME}
-difficulty=${DIFFICULTY}
-gamemode=${GAMEMODE}
-max-players=${MAX_PLAYERS}
-view-distance=${VIEW_DISTANCE}
-enable-command-block=${ENABLE_COMMAND_BLOCKS}
-allow-flight=${ALLOW_FLIGHT}
-online-mode=${ONLINE_MODE}
-white-list=${WHITE_LIST}
+# ------------------------------
+# Helper: Generate server.properties
+# ------------------------------
+generate_server_properties() {
+  echo "✅ server.properties generated successfully."
+  cat > server.properties <<EOF
+level-name=$WORLD_NAME
+difficulty=$DIFFICULTY
+gamemode=$GAMEMODE
+max-players=$MAX_PLAYERS
+view-distance=$VIEW_DISTANCE
+enable-command-block=$ENABLE_COMMAND_BLOCKS
+allow-flight=$ALLOW_FLIGHT
+motd=$MOTD
+online-mode=$ONLINE_MODE
+white-list=$WHITE_LIST
 EOF
-echo "✅ server.properties generated successfully."
-
-# --- Helper functions ---
-get_installed_version_fabric() {
-  [ -f fabric-server-launch.jar ] && java -jar fabric-server-launch.jar --version 2>/dev/null | grep -oP 'Minecraft \K[\d\.]+'
 }
 
-get_installed_version_vanilla() {
-  [ -f server.jar ] && unzip -p server.jar version.json | grep -oP '"id":\s*"\K[\d\.]+'
-}
+generate_server_properties
 
-install_fabric() {
-  INSTALLED_MC_VERSION=$(get_installed_version_fabric || echo "")
-  if [ "$INSTALLED_MC_VERSION" = "$MC_VERSION" ]; then
-    echo "✅ Fabric server for MC ${MC_VERSION} already installed."
-    return
-  elif [ -n "$INSTALLED_MC_VERSION" ]; then
-    echo "⚠️ Fabric: old version detected (${INSTALLED_MC_VERSION}), updating to ${MC_VERSION}..."
-    rm -f fabric-server-launch.jar
-  fi
-
-  echo "🌐 Installing Fabric server for MC ${MC_VERSION}..."
-  curl -L -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/${FABRIC_INSTALLER_VERSION}/fabric-installer-${FABRIC_INSTALLER_VERSION}.jar"
-  java -jar fabric-installer.jar server -mcversion "${MC_VERSION}" -downloadMinecraft
-  rm fabric-installer.jar
-  echo "✅ Fabric server installed."
-}
-
-install_forge() {
-  # Note: Forge installer overwrites the jar, so we reinstall if version differs
-  # This is a simplified version; ideally, you parse the installer metadata for version
-  echo "🌐 Installing Forge server for MC ${MC_VERSION}..."
-  curl -L -o forge-installer.jar "https://maven.minecraftforge.net/net/minecraftforge/forge/${FORGE_INSTALLER_VERSION}/forge-${FORGE_INSTALLER_VERSION}-installer.jar"
-  java -jar forge-installer.jar --installServer
-  rm forge-installer.jar
-  SERVER_JAR="forge-${FORGE_INSTALLER_VERSION}.jar"
-  echo "✅ Forge server installed."
-}
-
-install_quilt() {
-  echo "🌐 Installing Quilt server for MC ${MC_VERSION}..."
-  curl -L -o quilt-installer.jar "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/${QUILT_INSTALLER_VERSION}/quilt-installer-${QUILT_INSTALLER_VERSION}.jar"
-  java -jar quilt-installer.jar install server "${MC_VERSION}" --download-server
-  rm quilt-installer.jar
-  SERVER_JAR="quilt-server-launch.jar"
-  echo "✅ Quilt server installed."
-}
-
+# ------------------------------
+# Helper: Install Vanilla
+# ------------------------------
 install_vanilla() {
-  INSTALLED_MC_VERSION=$(get_installed_version_vanilla || echo "")
-  if [ "$INSTALLED_MC_VERSION" = "$MC_VERSION" ]; then
-    echo "✅ Vanilla server for MC ${MC_VERSION} already installed."
-    SERVER_JAR="server.jar"
+  if [ -f "server.jar" ]; then
+    echo "✅ Vanilla server already installed."
     return
   fi
 
   echo "🌐 Installing Vanilla server ${MC_VERSION}..."
-  DOWNLOAD_URL=$(curl -s https://launchermeta.mojang.com/mc/game/version_manifest.json \
-    | grep -A5 "\"${MC_VERSION}\"" \
-    | grep 'url' \
-    | head -1 \
-    | cut -d '"' -f4)
-  SERVER_URL=$(curl -s "$DOWNLOAD_URL" | grep 'server' | grep 'url' | cut -d '"' -f4)
+  
+  VERSION_MANIFEST=$(curl -s https://launchermeta.mojang.com/mc/game/version_manifest.json)
+  VERSION_URL=$(echo "$VERSION_MANIFEST" | jq -r --arg VER "$MC_VERSION" '.versions[] | select(.id==$VER) | .url')
+  if [ -z "$VERSION_URL" ]; then
+    echo "❌ ERROR: Minecraft version $MC_VERSION not found!"
+    exit 1
+  fi
+
+  SERVER_URL=$(curl -s "$VERSION_URL" | jq -r '.downloads.server.url')
+  if [ -z "$SERVER_URL" ]; then
+    echo "❌ ERROR: Server download URL not found!"
+    exit 1
+  fi
+
   curl -L -o server.jar "$SERVER_URL"
-  SERVER_JAR="server.jar"
   echo "✅ Vanilla server installed."
 }
 
-# --- Install / Update server depending on type ---
-case "${SERVER_TYPE}" in
+# ------------------------------
+# Helper: Install Fabric
+# ------------------------------
+install_fabric() {
+  if [ -f "fabric-server-launch.jar" ]; then
+    echo "✅ Fabric server already installed."
+    return
+  fi
+
+  echo "🌐 Installing Fabric server ${MC_VERSION}..."
+  curl -L -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/${FABRIC_INSTALLER_VERSION}/fabric-installer-${FABRIC_INSTALLER_VERSION}.jar"
+  java -jar fabric-installer.jar server -mcversion "$MC_VERSION" -downloadMinecraft
+  rm fabric-installer.jar
+  echo "✅ Fabric server installed."
+}
+
+# ------------------------------
+# Helper: Install Forge
+# ------------------------------
+install_forge() {
+  if [ -f "forge-${MC_VERSION}-installer.jar" ]; then
+    echo "✅ Forge server already installed."
+    return
+  fi
+
+  echo "🌐 Installing Forge server ${MC_VERSION}..."
+  
+  # Determine Forge installer URL
+  if [ "$FORGE_INSTALLER_VERSION" = "latest" ]; then
+    # Get latest recommended version
+    FORGE_JSON=$(curl -s https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.json)
+    FORGE_INSTALLER_VERSION=$(echo "$FORGE_JSON" | jq -r '.versioning.release')
+  fi
+
+  FORGE_URL="https://maven.minecraftforge.net/net/minecraftforge/forge/${MC_VERSION}-${FORGE_INSTALLER_VERSION}/forge-${MC_VERSION}-${FORGE_INSTALLER_VERSION}-installer.jar"
+
+  curl -L -o forge-installer.jar "$FORGE_URL"
+  java -jar forge-installer.jar --installServer
+  rm forge-installer.jar
+  mv forge-*-universal.jar forge-server.jar
+  echo "✅ Forge server installed."
+}
+
+# ------------------------------
+# Helper: Install Quilt
+# ------------------------------
+install_quilt() {
+  if [ -f "quilt-server-launch.jar" ]; then
+    echo "✅ Quilt server already installed."
+    return
+  fi
+
+  echo "🌐 Installing Quilt server ${MC_VERSION}..."
+  curl -L -o quilt-installer.jar "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/${QUILT_INSTALLER_VERSION}/quilt-installer-${QUILT_INSTALLER_VERSION}.jar"
+  java -jar quilt-installer.jar server -mcversion "$MC_VERSION" -downloadMinecraft
+  rm quilt-installer.jar
+  echo "✅ Quilt server installed."
+}
+
+# ------------------------------
+# Accept EULA
+# ------------------------------
+if [ ! -f "eula.txt" ]; then
+  echo "eula=true" > eula.txt
+fi
+
+# ------------------------------
+# Install Server Based on Type
+# ------------------------------
+case "$SERVER_TYPE" in
+  vanilla)
+    install_vanilla
+    SERVER_JAR="server.jar"
+    ;;
   fabric)
     install_fabric
     SERVER_JAR="fabric-server-launch.jar"
     ;;
   forge)
     install_forge
+    SERVER_JAR="forge-server.jar"
     ;;
   quilt)
     install_quilt
-    ;;
-  vanilla)
-    install_vanilla
+    SERVER_JAR="quilt-server-launch.jar"
     ;;
   *)
-    echo "❌ ERROR: Unknown SERVER_TYPE '${SERVER_TYPE}'. Must be one of: fabric, forge, quilt, vanilla"
+    echo "❌ Unknown SERVER_TYPE: $SERVER_TYPE. Must be one of vanilla, fabric, forge, quilt."
     exit 1
     ;;
 esac
 
-# --- Launch the server ---
-echo "🚀 Launching ${SERVER_TYPE^} Minecraft ${MC_VERSION} with ${MEMORY_MAX} RAM..."
-exec java -Xmx${MEMORY_MAX} -Xms${MEMORY_MIN} -jar "${SERVER_JAR}" nogui
+# ------------------------------
+# Run Server
+# ------------------------------
+echo "🚀 Starting Minecraft server (${SERVER_TYPE})..."
+exec java $JVM_OPTS -jar "$SERVER_JAR" nogui
